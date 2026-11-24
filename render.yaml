@@ -1,0 +1,29 @@
+# Render Blueprint. Deploy with: Dashboard > New > Blueprint, or `render blueprint launch`.
+# NOTE: SQLite needs a persistent disk, which Render only offers on paid instance
+# types (Starter and up). The free plan would lose all users/solves on every deploy.
+services:
+  - type: web
+    name: rootquest
+    runtime: docker
+    plan: starter
+    region: oregon
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /app/data
+      - key: TRUST_PROXY
+        value: "1"
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false # set a strong password in the dashboard
+      - key: FLAG_SECRET
+        sync: false # optional; leave empty to auto-generate into data/secrets.json
+      - key: JWT_SECRET
+        sync: false
+    disk:
+      name: rootquest-data
+      mountPath: /app/data
+      sizeGB: 1
