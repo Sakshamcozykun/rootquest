@@ -76,9 +76,15 @@ in the dashboard; use `sync: false` variables rather than committing them.
 No account needed; dies when the machine or process stops:
 
 ```bash
-cloudflared tunnel --url http://localhost:3000
-# prints https://<random>.trycloudflare.com
+./start-public.sh     # prints the live URL; also starts the app and installs tools if needed
+./stop-public.sh      # stop both
 ```
+
+`start-public.sh` tries a Cloudflare quick tunnel first and automatically falls
+back to a `localhost.run` SSH tunnel when Cloudflare's quick-tunnel API is
+unavailable. Both are free, account-less, temporary and give a new URL on every
+restart. The script only accepts a URL after checking that real traffic reaches
+the app through it.
 
 ## Post-deploy checklist
 

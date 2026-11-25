@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Start RootQuest and a public Cloudflare quick tunnel in one command.
-# Usage: ./start-public.sh
+# Start RootQuest and a public tunnel in one command.
+# Tries Cloudflare quick tunnel first; falls back to localhost.run if
+# Cloudflare's API is unavailable. Usage: ./start-public.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -70,6 +71,16 @@ else
 fi
 
 # ----------------------------------------------------------- public tunnel ---
+# Retire a tunnel this script started earlier so the printed URL is current.
+if [ -f .tunnel.pid ] && kill -0 "$(cat .tunnel.pid)" 2>/dev/null; then
+  kill "$(cat .tunnel.pid)" 2>/dev/null || true
+  sleep 0.5
+fi
+rm -f .tunnel.pid
+
+# A candidate URL only counts when traffic actually reaches our app through it.
+url_ok() { [ -n "$1" ] && curl -fsS -o /dev/null --max-time 8 "$1/" >/dev/null 2>&1; }
+
 find_cloudflared() {
   for c in "$(command -v cloudflared 2>/dev/null || true)" "$HOME/.local/bin/cloudflared" /tmp/opencode/cloudflared; do
     [ -n "$c" ] && [ -x "$c" ] && { printf '%s' "$c"; return 0; }
@@ -77,6 +88,10 @@ find_cloudflared() {
   return 1
 }
 
+URL=""
+PROVIDER=""
+
+# --- attempt 1 & 2: Cloudflare quick tunnel ---------------------------------
 if ! CLOUDFLARED="$(find_cloudflared)"; then
   say "cloudflared not found. Downloading it to $HOME/.local/bin ..."
   mkdir -p "$HOME/.local/bin"
@@ -90,34 +105,69 @@ if ! CLOUDFLARED="$(find_cloudflared)"; then
   CLOUDFLARED="$HOME/.local/bin/cloudflared"
 fi
 
-# Replace a tunnel this script started earlier, so the printed URL is alive.
-if [ -f .tunnel.pid ] && kill -0 "$(cat .tunnel.pid)" 2>/dev/null; then
-  kill "$(cat .tunnel.pid)" 2>/dev/null || true
-  sleep 0.5
-fi
-: > logs/tunnel.log
-say "Opening a public tunnel ..."
-nohup "$CLOUDFLARED" tunnel --url "http://127.0.0.1:$PORT" --no-autoupdate >> logs/tunnel.log 2>&1 < /dev/null &
-echo $! > .tunnel.pid
-
-URL=""
-for _ in $(seq 1 60); do
-  URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' logs/tunnel.log | head -1 || true)"
-  [ -n "$URL" ] && break
-  sleep 0.5
+for attempt in 1 2; do
+  CF_LOG=logs/tunnel.log
+  : > "$CF_LOG"
+  say "Opening a Cloudflare tunnel (attempt $attempt) ..."
+  nohup "$CLOUDFLARED" tunnel --url "http://127.0.0.1:$PORT" --no-autoupdate >> "$CF_LOG" 2>&1 < /dev/null &
+  PID=$!
+  echo "$PID" > .tunnel.pid
+  for _ in $(seq 1 40); do
+    # Match only a real 4-word quick-tunnel hostname. Never grab the
+    # "https://api.trycloudflare.com/tunnel" URL from an error message.
+    URL="$(grep -oE 'https://[a-z0-9]+-[a-z0-9]+-[a-z0-9]+-[a-z0-9]+\.trycloudflare\.com' "$CF_LOG" | head -1 || true)"
+    url_ok "$URL" && break
+    kill -0 "$PID" 2>/dev/null || break
+    sleep 0.5
+  done
+  if url_ok "$URL"; then
+    PROVIDER="Cloudflare"
+    break
+  fi
+  kill "$PID" 2>/dev/null || true
+  wait "$PID" 2>/dev/null || true
+  rm -f .tunnel.pid
+  URL=""
+  say "Cloudflare tunnel did not come up."
+  sleep 1
 done
 
+# --- fallback: localhost.run over plain SSH --------------------------------
+if [ -z "$PROVIDER" ]; then
+  say "Falling back to localhost.run ..."
+  KEY="$HOME/.ssh/rootquest_localhost_run"
+  [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -f "$KEY" -N ''
+  LR_LOG=logs/tunnel-localhost.log
+  : > "$LR_LOG"
+  nohup ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 -o ConnectTimeout=10 -i "$KEY" \
+    -R "80:localhost:$PORT" localhost.run >> "$LR_LOG" 2>&1 < /dev/null &
+  echo $! > .tunnel.pid
+  for _ in $(seq 1 60); do
+    # Only a generated hostname, never banner links like https://admin.localhost.run
+    URL="$(grep -oE 'https://[a-z0-9]{8,}\.app\.lhr\.life' "$LR_LOG" | head -1 || true)"
+    url_ok "$URL" && break
+    sleep 0.5
+  done
+  if url_ok "$URL"; then
+    PROVIDER="localhost.run"
+  else
+    URL=""
+  fi
+fi
+
 if [ -z "$URL" ]; then
-  say "Tunnel did not come up. Last log lines:"
-  tail -20 logs/tunnel.log || true
+  say "No public tunnel available. Last log lines:"
+  tail -20 logs/tunnel.log 2>/dev/null || true
+  tail -20 logs/tunnel-localhost.log 2>/dev/null || true
   exit 1
 fi
 
 say ""
 say "============================================================"
-say " RootQuest is live:  $URL"
+say " RootQuest is live:  $URL   ($PROVIDER)"
 say " Local address:      http://localhost:$PORT"
-say " Logs:               logs/server.log  logs/tunnel.log"
+say " Logs:               logs/server.log  logs/tunnel*.log"
 say " Stop everything:    ./stop-public.sh"
 say "============================================================"
 say ""
